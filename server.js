@@ -13,7 +13,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status:'ok', service:'The Rotation Data Proxy', endpoints:['/congress','/insiders'] });
+  res.json({ status:'ok', service:'The Rotation Data Proxy', endpoints:['/congress','/insiders','/debug-pdf'] });
 });
 
 function stripHtml(s) {
@@ -21,37 +21,58 @@ function stripHtml(s) {
 }
 
 // ── PARSE TICKERS FROM PTR PDF ────────────────────────────────
-// House PTR PDF text (after pdf-parse) looks like:
-// "Waters Corporation Common Stock (WAT) [ST] P 12/08/2025 01/01/2026 $1,001 - $15,000"
-// "Workday, Inc. Class A (WDAY) [ST] S (partial) 07/24/2025 08/11/2025 $1,001 - $15,000"
+// Actual pdf-parse output format (from debug endpoint):
+//   Line: "(ABT) [ST]"
+//   Line: "P10/23/202408/11/2025$1,001 - $15,000"   ← P or S directly followed by date, NO space
+//   Line: "(ABT) [ST]"
+//   Line: "S12/08/202501/01/2026$1,001 - $15,000"
 function parsePdfTrades(text) {
   const trades = [];
-  const SKIP   = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','HN']);
+  const SKIP   = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','HN','AB']);
+  const lines  = text.split('\n');
 
-  // Normalize: collapse whitespace, keep structure
-  const flat = text.replace(/\r/g, '').replace(/\n/g, ' ').replace(/\s{2,}/g, ' ');
+  let currentTicker = '';
 
-  // PATTERN: (TICKER)[optional [XX]] whitespace P|S [optional (partial)] DATE DATE $AMOUNT
-  // This covers the exact House PTR table layout
-  const re = /\(([A-Z]{1,5})\)(?:\s*\[[A-Z]{1,3}\])*\s+(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
-  let m;
-  while ((m = re.exec(flat)) !== null) {
-    const ticker = m[1];
-    const type   = m[2] === 'P' ? 'Purchase' : 'Sale';
-    const amount = m[5];
-    if (SKIP.has(ticker)) continue;
-    trades.push({ ticker, type, amount });
-  }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
 
-  // FALLBACK: if nothing found, try looser match — ticker then P|S anywhere nearby then amount
-  if (trades.length === 0) {
-    const re2 = /\(([A-Z]{1,5})\)[^$\n]{0,250}\s(P|S)\s[^\n$]{0,80}(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
-    while ((m = re2.exec(flat)) !== null) {
-      const ticker = m[1];
-      const type   = m[2] === 'P' ? 'Purchase' : 'Sale';
-      const amount = m[3];
-      if (SKIP.has(ticker)) continue;
-      trades.push({ ticker, type, amount });
+    // Look for ticker in parens — could be "(ABT) [ST]" or end of a longer line
+    const tickerMatch = line.match(/\(([A-Z]{1,5})\)(?:\s*\[[A-Z]{1,3}\])?$/);
+    if (tickerMatch) {
+      const t = tickerMatch[1];
+      if (!SKIP.has(t)) currentTicker = t;
+      continue;
+    }
+
+    // Look for transaction line: starts with P or S immediately followed by a date
+    // Format: P10/23/202408/11/2025$1,001 - $15,000
+    //      or S12/08/202501/01/2026$1,001 - $15,000
+    const txMatch = line.match(/^([PS])(\d{2}\/\d{2}\/\d{4})(\d{2}\/\d{2}\/\d{4})(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/);
+    if (txMatch && currentTicker) {
+      const type   = txMatch[1] === 'P' ? 'Purchase' : 'Sale';
+      const amount = txMatch[4];
+      trades.push({ ticker: currentTicker, type, amount });
+      // Keep currentTicker — same stock can have multiple transactions
+      continue;
+    }
+
+    // Also catch partial sales: "S (partial)12/08/202501/01/2026$1,001 - $15,000"
+    const partialMatch = line.match(/^([PS])\s*\(partial\)(\d{2}\/\d{2}\/\d{4})(\d{2}\/\d{2}\/\d{4})(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/);
+    if (partialMatch && currentTicker) {
+      const type   = partialMatch[1] === 'P' ? 'Purchase' : 'Sale';
+      const amount = partialMatch[4];
+      trades.push({ ticker: currentTicker, type, amount });
+      continue;
+    }
+
+    // If we hit a non-matching, non-blank line that isn't metadata, reset ticker
+    // (but keep it for Filing Status / Subholding Of lines which are metadata)
+    if (!line.startsWith('F') && !line.startsWith('S\x00') && !line.includes('Filing') && !line.includes('Merrill') && !line.includes('Subholding') && !line.includes('IDOwner') && !line.includes('Type') && !line.includes('Date') && !line.includes('Amount') && !line.includes('Gains') && !line.includes('$200')) {
+      // Only reset if it looks like a new asset name (not a transaction continuation)
+      if (!line.match(/^\$/) && !line.match(/^\d/) && line.length > 3) {
+        currentTicker = '';
+      }
     }
   }
 
@@ -95,8 +116,8 @@ app.get('/congress', async (req, res) => {
     if (filings.length === 0) return res.status(404).json({ error:'No PTR filings found' });
     console.log(`Found ${filings.length} PTR filings`);
 
-    const allTrades   = [];
-    const fallbacks   = [];
+    const allTrades = [];
+    const fallbacks = [];
 
     await Promise.all(filings.slice(0, 40).map(async filing => {
       const pdfUrl = `https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${filing.year}/${filing.docId}.pdf`;
@@ -109,7 +130,7 @@ app.get('/congress', async (req, res) => {
         const buf    = await r.buffer();
         const pdf    = await pdfParse(buf);
         const parsed = parsePdfTrades(pdf.text);
-        console.log(`  ${filing.name}: ${parsed.length} trades parsed`);
+        console.log(`  ${filing.name}: ${parsed.length} trades (${parsed.filter(t=>t.type==='Purchase').length}P / ${parsed.filter(t=>t.type==='Sale').length}S)`);
         if (parsed.length === 0) { fallbacks.push(fallback); return; }
         parsed.forEach(t => allTrades.push({
           Representative:filing.name, Party:'?', Chamber:'House', State:filing.state,
@@ -125,11 +146,25 @@ app.get('/congress', async (req, res) => {
     const combined = [...allTrades, ...fallbacks];
     combined.sort((a,b) => new Date(b.Date) - new Date(a.Date));
     console.log(`Returning ${combined.length} trades (${allTrades.length} with tickers, ${fallbacks.length} fallback)`);
-
-    res.json({ success:true, count:combined.length, withTickers:allTrades.length, source:'US House PTR Filings (PDF parsed)', trades:combined.slice(0,120) });
+    res.json({ success:true, count:combined.length, withTickers:allTrades.length, source:'US House PTR Filings (PDF parsed)', trades:combined.slice(0,200) });
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── DEBUG: See raw PDF text ───────────────────────────────────
+app.get('/debug-pdf', async (req, res) => {
+  try {
+    const docId = req.query.doc || '20030977';
+    const year  = req.query.year || '2026';
+    const url   = `https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${year}/${docId}.pdf`;
+    const r     = await fetch(url, { headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:12000 });
+    if (!r.ok) return res.status(404).json({ error: `PDF fetch failed: ${r.status}` });
+    const buf  = await r.buffer();
+    const pdf  = await pdfParse(buf);
+    const parsed = parsePdfTrades(pdf.text);
+    res.json({ docId, url, totalLength: pdf.text.length, parsedTrades: parsed, lines: pdf.text.split('\n').slice(0, 100) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── INSIDER TRADES (SEC EDGAR Form 4) ────────────────────────
@@ -211,29 +246,6 @@ app.get('/insiders', async (req, res) => {
     const clustered = Object.values(byTicker).filter(g=>g.buys.length+g.sells.length>0).sort((a,b)=>(b.buys.length+b.sells.length)-(a.buys.length+a.sells.length));
     res.json({success:true, count:allTrades.length, source:'SEC EDGAR Form 4', trades:allTrades, clustered});
   } catch(err) { res.status(500).json({error:err.message}); }
-});
-
-
-// ── DEBUG: See raw PDF text ───────────────────────────────────
-app.get('/debug-pdf', async (req, res) => {
-  try {
-    const docId = req.query.doc || '20030977';
-    const year  = req.query.year || '2026';
-    const url   = `https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${year}/${docId}.pdf`;
-    const r     = await fetch(url, { headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:12000 });
-    if (!r.ok) return res.status(404).json({ error: `PDF fetch failed: ${r.status}` });
-    const buf  = await r.buffer();
-    const pdf  = await pdfParse(buf);
-    // Return first 3000 chars of raw text so we can see the exact format
-    res.json({
-      docId, url,
-      totalLength: pdf.text.length,
-      rawText: pdf.text.substring(0, 3000),
-      lines: pdf.text.substring(0, 3000).split('\n').slice(0, 80),
-    });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
 });
 
 app.listen(PORT, () => console.log('The Rotation proxy running on port ' + PORT));
