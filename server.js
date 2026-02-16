@@ -20,111 +20,44 @@ function stripHtml(s) {
   return (s||'').replace(/<[^>]+>/g,'').replace(/&amp;/g,'&').replace(/&#39;/g,"'").replace(/&nbsp;/g,' ').trim();
 }
 
-// ── PARSE TICKERS FROM PTR PDF TEXT ──────────────────────────
-// House PTR PDFs have a consistent table format:
-// Asset | Transaction Type | Date | Amount | Cap Gains
-// Tickers appear as $ prefix or in parens like (NVDA)
-function parseTradesFromPdfText(text, representative) {
+// ── PARSE TICKERS FROM PTR PDF ────────────────────────────────
+// House PTR PDF text (after pdf-parse) looks like:
+// "Waters Corporation Common Stock (WAT) [ST] P 12/08/2025 01/01/2026 $1,001 - $15,000"
+// "Workday, Inc. Class A (WDAY) [ST] S (partial) 07/24/2025 08/11/2025 $1,001 - $15,000"
+function parsePdfTrades(text) {
   const trades = [];
-  const lines  = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const SKIP   = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','HN']);
 
-  // The House PTR PDF format has rows like:
-  // SP  Alphabet Inc. - Class A Common Stock (GOOGL) [ST]  P  01/16/2026  01/16/2026  $500,001 - $1,000,000
-  // We need to find lines with a ticker in parens AND a transaction type AND an amount
+  // Normalize: collapse whitespace, keep structure
+  const flat = text.replace(/\r/g, '').replace(/\n/g, ' ').replace(/\s{2,}/g, ' ');
 
-  const amountPattern = /\$[\d,]+(?:\s*-\s*\$[\d,]+)?/;
-  
-  // Strategy 1: Find lines containing (TICKER) pattern with amount on same or adjacent line
-  let currentAsset  = '';
-  let currentTicker = '';
-  let currentType   = '';
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const next = lines[i+1] || '';
-    const combined = line + ' ' + next;
-
-    // Skip noise lines
-    if (line.length < 3) continue;
-    if (/^(ID|Owner|Asset|Transaction|Date|Notification|Amount|Cap\.|Page|Filing|Clerk|PERIODIC|Hon\.|Name:|Status:|State)/.test(line)) continue;
-
-    // Find ticker in parens — most reliable pattern in House PDFs
-    const tickerMatch = line.match(/\(([A-Z]{1,5})\)/) || 
-                        line.match(/\[([A-Z]{1,5})\](?!ST|OT|AB|OP|MF)/);
-    
-    if (tickerMatch) {
-      currentTicker = tickerMatch[1];
-      currentAsset  = line;
-    }
-
-    // Find transaction type — standalone P or S, or full word
-    // Look in current line and next few lines
-    const searchText = lines.slice(i, i+4).join(' ');
-    const txMatch    = searchText.match(/\b(Purchase|Sale)\b/i) ||
-                       line.match(/^\s*([PS])\s+\d/) ||  // P 01/16/2026
-                       line.match(/\s([PS])\s+\d{2}\/\d{2}/);  // SP ... P 01/16
-
-    if (txMatch && currentTicker) {
-      const txWord = txMatch[1].toUpperCase();
-      currentType  = (txWord === 'P' || txWord.startsWith('P')) ? 'Purchase' : 'Sale';
-    }
-
-    // Find amount
-    const amountMatch = combined.match(amountPattern);
-    
-    if (currentTicker && currentType && amountMatch) {
-      trades.push({
-        ticker: currentTicker,
-        asset:  currentAsset,
-        type:   currentType,
-        amount: amountMatch[0],
-      });
-      // Only reset type/amount — keep ticker in case same stock traded again
-      currentType   = '';
-    }
-  }
-
-  // Strategy 2: Scan full text for all patterns
-  const fullText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ');
-  const SKIP = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','HN','NO','OF','IN','TO','AT','BY','AN','AS','OR','ON','IF']);
-
-  // Pattern A: (TICKER) [optional bracket tags] P|S [optional (partial)] DATE DATE $amount
-  // This is the exact House PTR table format
-  const patternA = /\(([A-Z]{1,5})\)(?:\s*\[[A-Z]{2}\])?(?:\s*\[[A-Z]{2}\])?\s+(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:[\s,]*-[\s,]*\$[\d,]+)?)/g;
+  // PATTERN: (TICKER)[optional [XX]] whitespace P|S [optional (partial)] DATE DATE $AMOUNT
+  // This covers the exact House PTR table layout
+  const re = /\(([A-Z]{1,5})\)(?:\s*\[[A-Z]{1,3}\])*\s+(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
   let m;
-  while ((m = patternA.exec(fullText)) !== null) {
-    const ticker = m[1], txCode = m[2], amount = m[5];
+  while ((m = re.exec(flat)) !== null) {
+    const ticker = m[1];
+    const type   = m[2] === 'P' ? 'Purchase' : 'Sale';
+    const amount = m[5];
     if (SKIP.has(ticker)) continue;
-    trades.push({ ticker, asset: '', type: txCode === 'P' ? 'Purchase' : 'Sale', amount });
+    trades.push({ ticker, type, amount });
   }
 
-  // Pattern B: (TICKER) anywhere, then within 200 chars find P|S then DATE DATE $amount  
-  // More permissive fallback for varied PDF layouts
-  const patternB = /\(([A-Z]{1,5})\)[^$\n]{0,200}?\s(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:[\s,]*-[\s,]*\$[\d,]+)?)/g;
-  while ((m = patternB.exec(fullText)) !== null) {
-    const ticker = m[1], txCode = m[2], amount = m[5];
-    if (SKIP.has(ticker)) continue;
-    const alreadyFound = trades.some(t => t.ticker === ticker && t.amount === amount);
-    if (!alreadyFound) {
-      trades.push({ ticker, asset: '', type: txCode === 'P' ? 'Purchase' : 'Sale', amount });
-    }
-  }
-
-  // Pattern C: No date required — (TICKER) near P|S near $amount (most permissive)
-  // Only runs if patterns A+B found nothing
+  // FALLBACK: if nothing found, try looser match — ticker then P|S anywhere nearby then amount
   if (trades.length === 0) {
-    const patternC = /\(([A-Z]{1,5})\)[^$]{0,300}?\b(Purchase|Sale)\b[^$]{0,100}?(\$[\d,]+(?:[\s,]*-[\s,]*\$[\d,]+)?)/g;
-    while ((m = patternC.exec(fullText)) !== null) {
-      const ticker = m[1], txWord = m[2], amount = m[3];
+    const re2 = /\(([A-Z]{1,5})\)[^$\n]{0,250}\s(P|S)\s[^\n$]{0,80}(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
+    while ((m = re2.exec(flat)) !== null) {
+      const ticker = m[1];
+      const type   = m[2] === 'P' ? 'Purchase' : 'Sale';
+      const amount = m[3];
       if (SKIP.has(ticker)) continue;
-      trades.push({ ticker, asset: '', type: txWord === 'Purchase' ? 'Purchase' : 'Sale', amount });
+      trades.push({ ticker, type, amount });
     }
   }
 
-  // Deduplicate by ticker+type+amount, keeping first occurrence
+  // Deduplicate by ticker+type+amount
   const seen = new Set();
   return trades.filter(t => {
-    if (!t.ticker || t.ticker.length < 1 || t.ticker.length > 5) return false;
     const key = t.ticker + t.type + t.amount;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -135,7 +68,6 @@ function parseTradesFromPdfText(text, representative) {
 // ── CONGRESSIONAL TRADES ──────────────────────────────────────
 app.get('/congress', async (req, res) => {
   try {
-    // Step 1: Get all PTR filings from House XML
     const filings = [];
     for (const year of [2026, 2025]) {
       const r = await fetch(`https://disclosures-clerk.house.gov/public_disc/financial-pdfs/${year}FD.xml`, {
@@ -145,7 +77,6 @@ app.get('/congress', async (req, res) => {
       const xml     = await r.text();
       const members = xml.match(/<Member>([\s\S]*?)<\/Member>/gi) || [];
       const cutoff  = Date.now() - 90 * 86400 * 1000;
-
       members.forEach(m => {
         const get = tag => { const x = m.match(new RegExp('<'+tag+'[^>]*>([^<]*)</'+tag+'>', 'i')); return x ? x[1].trim() : ''; };
         if (get('FilingType') !== 'P') return;
@@ -161,84 +92,42 @@ app.get('/congress', async (req, res) => {
       if (filings.length >= 60) break;
     }
 
-    console.log('Total PTR filings found:', filings.length);
     if (filings.length === 0) return res.status(404).json({ error:'No PTR filings found' });
+    console.log(`Found ${filings.length} PTR filings`);
 
-    // Step 2: Fetch and parse each PDF
-    const allTrades = [];
-    const filingsMeta = [];
+    const allTrades   = [];
+    const fallbacks   = [];
 
-    // Process in batches of 10 to avoid timeout
-    const batch = filings.slice(0, 40);
-
-    await Promise.all(batch.map(async filing => {
+    await Promise.all(filings.slice(0, 40).map(async filing => {
       const pdfUrl = `https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${filing.year}/${filing.docId}.pdf`;
+      const fallback = { Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:'?', Company:'See filing', Amount:'See filing', Date:filing.date, Filed:filing.date, Transaction:'Purchase/Sale', Committee:'', FilingUrl:pdfUrl };
 
+      if (!filing.docId) { fallbacks.push(fallback); return; }
       try {
-        const r = await fetch(pdfUrl, {
-          headers: { 'User-Agent': 'Mozilla/5.0 TheRotation/1.0' },
-          timeout: 12000,
-        });
-        if (!r.ok) {
-          // Add filing metadata even without PDF parse
-          filingsMeta.push({ Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:'?', Company:'See filing', Amount:'See filing', Date:filing.date, Filed:filing.date, Transaction:'Purchase/Sale', Committee:'', FilingUrl:pdfUrl });
-          return;
-        }
-
-        const buffer = await r.buffer();
-        const pdf    = await pdfParse(buffer);
-        const text   = pdf.text;
-
-        console.log(`Parsed PDF for ${filing.name}: ${text.length} chars`);
-
-        const trades = parseTradesFromPdfText(text, filing.name);
-        console.log(`  → ${trades.length} trades found`);
-
-        if (trades.length === 0) {
-          // No trades parsed — add filing metadata as fallback
-          filingsMeta.push({ Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:'?', Company:'See filing', Amount:'See filing', Date:filing.date, Filed:filing.date, Transaction:'Purchase/Sale', Committee:'', FilingUrl:pdfUrl });
-          return;
-        }
-
-        trades.forEach(t => {
-          allTrades.push({
-            Representative: filing.name,
-            Party:          '?',
-            Chamber:        'House',
-            State:          filing.state,
-            Ticker:         t.ticker,
-            Company:        t.asset || '?',
-            Amount:         t.amount,
-            Date:           filing.date,
-            Filed:          filing.date,
-            Transaction:    t.type,
-            Committee:      '',
-            FilingUrl:      pdfUrl,
-          });
-        });
-
+        const r = await fetch(pdfUrl, { headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:12000 });
+        if (!r.ok) { fallbacks.push(fallback); return; }
+        const buf    = await r.buffer();
+        const pdf    = await pdfParse(buf);
+        const parsed = parsePdfTrades(pdf.text);
+        console.log(`  ${filing.name}: ${parsed.length} trades parsed`);
+        if (parsed.length === 0) { fallbacks.push(fallback); return; }
+        parsed.forEach(t => allTrades.push({
+          Representative:filing.name, Party:'?', Chamber:'House', State:filing.state,
+          Ticker:t.ticker, Company:'?', Amount:t.amount, Date:filing.date, Filed:filing.date,
+          Transaction:t.type, Committee:'', FilingUrl:pdfUrl,
+        }));
       } catch(e) {
-        console.log('PDF error for', filing.name, filing.docId, ':', e.message);
-        filingsMeta.push({ Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:'?', Company:'See filing', Amount:'See filing', Date:filing.date, Filed:filing.date, Transaction:'Purchase/Sale', Committee:'', FilingUrl:pdfUrl });
+        console.log(`  PDF error ${filing.name} ${filing.docId}: ${e.message}`);
+        fallbacks.push(fallback);
       }
     }));
 
-    // Combine parsed trades + fallback metadata
-    const combined = [...allTrades, ...filingsMeta];
+    const combined = [...allTrades, ...fallbacks];
     combined.sort((a,b) => new Date(b.Date) - new Date(a.Date));
+    console.log(`Returning ${combined.length} trades (${allTrades.length} with tickers, ${fallbacks.length} fallback)`);
 
-    console.log('Total trades returned:', combined.length, '(', allTrades.length, 'with tickers,', filingsMeta.length, 'fallback)');
-
-    res.json({
-      success:    true,
-      count:      combined.length,
-      withTickers: allTrades.length,
-      source:     'US House PTR Filings (PDF parsed)',
-      trades:     combined.slice(0, 100),
-    });
-
+    res.json({ success:true, count:combined.length, withTickers:allTrades.length, source:'US House PTR Filings (PDF parsed)', trades:combined.slice(0,120) });
   } catch(err) {
-    console.error('Congress error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -279,7 +168,6 @@ app.get('/insiders', async (req, res) => {
           if (new Date(dates[i]).getTime() < cutoff) return;
           recent.push({date:dates[i], acc:accNs[i]});
         });
-
         await Promise.all(recent.slice(0,3).map(async ({date, acc}) => {
           try {
             const folder = acc.replace(/-/g,''), cikInt = parseInt(cik);
@@ -288,9 +176,8 @@ app.get('/insiders', async (req, res) => {
             });
             let xmlFile = acc + '.xml';
             if (idxR.ok) {
-              const idx   = await idxR.json();
-              const files = idx.directory?.item || [];
-              const found = files.find(f => f.name && f.name.endsWith('.xml') && !f.name.includes('index'));
+              const idx = await idxR.json();
+              const found = (idx.directory?.item||[]).find(f => f.name && f.name.endsWith('.xml') && !f.name.includes('index'));
               if (found) xmlFile = found.name;
             }
             const r2 = await fetch(`https://www.sec.gov/Archives/edgar/data/${cikInt}/${folder}/${xmlFile}`, {
@@ -303,11 +190,8 @@ app.get('/insiders', async (req, res) => {
             const role   = getTag('officerTitle') || (xml.includes('<isDirector>1') ? 'Director' : 'Insider');
             const txns   = xml.match(/<nonDerivativeTransaction>([\s\S]*?)<\/nonDerivativeTransaction>/gi) || [];
             txns.forEach(txn => {
-              const getB   = tag => { const m = txn.match(new RegExp('<'+tag+'[^>]*>([^<]*)</'+tag+'>', 'i')); return m ? m[1].trim() : ''; };
-              const code   = getB('transactionCode');
-              const shares = parseFloat(getB('transactionShares')||'0');
-              const price  = parseFloat(getB('transactionPricePerShare')||'0');
-              const value  = shares * price;
+              const getB = tag => { const m = txn.match(new RegExp('<'+tag+'[^>]*>([^<]*)</'+tag+'>', 'i')); return m ? m[1].trim() : ''; };
+              const code = getB('transactionCode'), shares = parseFloat(getB('transactionShares')||'0'), price = parseFloat(getB('transactionPricePerShare')||'0'), value = shares * price;
               if (value < 10000) return;
               const type = code==='P'?'Purchase':code==='S'?'Sale':null;
               if (!type) return;
@@ -324,28 +208,9 @@ app.get('/insiders', async (req, res) => {
       if (t.type==='Purchase') byTicker[t.ticker].buys.push(t);
       else byTicker[t.ticker].sells.push(t);
     });
-    const clustered = Object.values(byTicker)
-      .filter(g => g.buys.length+g.sells.length > 0)
-      .sort((a,b) => (b.buys.length+b.sells.length)-(a.buys.length+a.sells.length));
-
+    const clustered = Object.values(byTicker).filter(g=>g.buys.length+g.sells.length>0).sort((a,b)=>(b.buys.length+b.sells.length)-(a.buys.length+a.sells.length));
     res.json({success:true, count:allTrades.length, source:'SEC EDGAR Form 4', trades:allTrades, clustered});
   } catch(err) { res.status(500).json({error:err.message}); }
-});
-
-app.get('/debug-pdf', async (req, res) => {
-  try {
-    const pdfParse = require('pdf-parse');
-    const url = 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20030977.pdf';
-    const r = await fetch(url, { headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:15000 });
-    const buffer = await r.buffer();
-    const pdf = await pdfParse(buffer);
-    // Return first 3000 chars of extracted text so we can see exact format
-    res.json({
-      pages: pdf.numpages,
-      textLength: pdf.text.length,
-      rawText: pdf.text.slice(0, 3000),
-    });
-  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.listen(PORT, () => console.log('The Rotation proxy running on port ' + PORT));
