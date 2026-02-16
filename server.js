@@ -85,17 +85,34 @@ function parseTradesFromPdfText(text, representative) {
   }
 
   // Strategy 2: Scan entire text for pattern blocks
-  // Pattern: ticker in parens followed within 200 chars by P or S and a dollar amount
+  // House PTR format: (TICKER) [TYPE] ... P|S ... MM/DD/YYYY ... $amount
+  // The P or S transaction code appears between asset description and the trade date
+  // We match: (TICKER) then whitespace then exactly P or S then a date then amount
   const fullText = text.replace(/\n/g, ' ');
-  const blockPattern = /\(([A-Z]{1,5})\)[^$]{0,300}?\b(Purchase|Sale|[PS])\b[^$]{0,100}?(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/gi;
+  
+  // Pattern: (TICKER) followed by P or S as standalone character before a date
+  // \s[PS]\s matches P or S surrounded by spaces (not part of SP, LP, etc.)
+  const blockPattern = /\(([A-Z]{1,5})\)(?:[^()]{0,150}?)\s([PS])(?:\s+(?:partial\s+)?)(\d{2}\/\d{2}\/\d{4})[^$]{0,100}?(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
   let match;
   while ((match = blockPattern.exec(fullText)) !== null) {
     const ticker = match[1];
-    const txWord = match[2].toUpperCase();
-    const type   = (txWord === 'P' || txWord === 'PURCHASE') ? 'Purchase' : 'Sale';
-    const amount = match[3];
-    // Skip common false positives
+    const txCode = match[2].toUpperCase();
+    const type   = txCode === 'P' ? 'Purchase' : 'Sale';
+    const amount = match[4];
+    // Skip asset type tags and ownership codes
+    if (['ST', 'OT', 'OP', 'MF', 'DC', 'SP', 'JT', 'TR', 'IRA', 'JA', 'DEP', 'AB'].includes(ticker)) continue;
+    if (!amount) continue;
+    trades.push({ ticker, asset: '', type, amount });
+  }
+  
+  // Also catch "Purchase" or "Sale" written out (some PDFs spell it out)
+  const spelledPattern = /\(([A-Z]{1,5})\)(?:[^()]{0,150}?)(Purchase|Sale)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})[^$]{0,100}?(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
+  while ((match = spelledPattern.exec(fullText)) !== null) {
+    const ticker = match[1];
+    const type   = match[2] === 'Purchase' ? 'Purchase' : 'Sale';
+    const amount = match[4];
     if (['ST', 'OT', 'OP', 'MF', 'DC', 'SP', 'JT', 'TR', 'IRA', 'JA', 'DEP'].includes(ticker)) continue;
+    if (!amount) continue;
     trades.push({ ticker, asset: '', type, amount });
   }
 
