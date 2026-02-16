@@ -28,7 +28,7 @@ function stripHtml(s) {
 //   Line: "S12/08/202501/01/2026$1,001 - $15,000"
 function parsePdfTrades(text) {
   const trades = [];
-  const SKIP   = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','HN','AB']);
+  const SKIP   = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','HN']);
   const lines  = text.split('\n');
 
   let currentTicker = '';
@@ -66,14 +66,8 @@ function parsePdfTrades(text) {
       continue;
     }
 
-    // If we hit a non-matching, non-blank line that isn't metadata, reset ticker
-    // (but keep it for Filing Status / Subholding Of lines which are metadata)
-    if (!line.startsWith('F') && !line.startsWith('S\x00') && !line.includes('Filing') && !line.includes('Merrill') && !line.includes('Subholding') && !line.includes('IDOwner') && !line.includes('Type') && !line.includes('Date') && !line.includes('Amount') && !line.includes('Gains') && !line.includes('$200')) {
-      // Only reset if it looks like a new asset name (not a transaction continuation)
-      if (!line.match(/^\$/) && !line.match(/^\d/) && line.length > 3) {
-        currentTicker = '';
-      }
-    }
+    // Don't reset ticker on random text lines
+    // Ticker persists until a new (TICKER) pattern is found
   }
 
   // Deduplicate by ticker+type+amount
@@ -119,7 +113,7 @@ app.get('/congress', async (req, res) => {
     const allTrades = [];
     const fallbacks = [];
 
-    await Promise.all(filings.slice(0, 40).map(async filing => {
+    await Promise.all(filings.slice(0, 60).map(async filing => {
       const pdfUrl = `https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${filing.year}/${filing.docId}.pdf`;
       const fallback = { Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:'?', Company:'See filing', Amount:'See filing', Date:filing.date, Filed:filing.date, Transaction:'Purchase/Sale', Committee:'', FilingUrl:pdfUrl };
 
