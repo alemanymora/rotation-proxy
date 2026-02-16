@@ -28,57 +28,82 @@ function parseTradesFromPdfText(text, representative) {
   const trades = [];
   const lines  = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-  // Pattern 1: ticker with $ prefix e.g. "$NVDA" or "NVDA (NVIDIA)"
-  // Pattern 2: lines with P/S transaction codes and dollar amounts
-  // Pattern 3: asset description lines followed by transaction type lines
+  // The House PTR PDF format has rows like:
+  // SP  Alphabet Inc. - Class A Common Stock (GOOGL) [ST]  P  01/16/2026  01/16/2026  $500,001 - $1,000,000
+  // We need to find lines with a ticker in parens AND a transaction type AND an amount
 
+  const amountPattern = /\$[\d,]+(?:\s*-\s*\$[\d,]+)?/;
+  
+  // Strategy 1: Find lines containing (TICKER) pattern with amount on same or adjacent line
   let currentAsset  = '';
   let currentTicker = '';
-
-  const tickerPattern = /\b([A-Z]{1,5})\b/g;
-  const amountPattern = /\$[\d,]+(?:\s*-\s*\$[\d,]+)?/g;
-  const txTypePattern = /\b(Purchase|Sale|P|S)\b/i;
+  let currentType   = '';
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const next = lines[i+1] || '';
+    const combined = line + ' ' + next;
 
-    // Skip header/footer lines
-    if (line.includes('Page ') || line.includes('STOCK ACT') ||
-        line.includes('U.S. House') || line.includes('Clerk of')) continue;
+    // Skip noise lines
+    if (line.length < 3) continue;
+    if (/^(ID|Owner|Asset|Transaction|Date|Notification|Amount|Cap\.|Page|Filing|Clerk|PERIODIC|Hon\.|Name:|Status:|State)/.test(line)) continue;
 
-    // Look for ticker symbols — they appear in asset description
-    // Common pattern: "Apple Inc. (AAPL)" or "NVDA" standalone
-    const tickerMatch = line.match(/\(([A-Z]{1,5})\)/) ||
-                        line.match(/^([A-Z]{1,5})\s*$/) ||
-                        line.match(/\$([A-Z]{1,5})\b/);
-
+    // Find ticker in parens — most reliable pattern in House PDFs
+    const tickerMatch = line.match(/\(([A-Z]{1,5})\)/) || 
+                        line.match(/\[([A-Z]{1,5})\](?!ST|OT|AB|OP|MF)/);
+    
     if (tickerMatch) {
       currentTicker = tickerMatch[1];
       currentAsset  = line;
     }
 
-    // Look for transaction lines — contain P or S and a dollar amount
-    const hasTxType = txTypePattern.test(line);
-    const amounts   = line.match(amountPattern) || [];
+    // Find transaction type — standalone P or S, or full word
+    // Look in current line and next few lines
+    const searchText = lines.slice(i, i+4).join(' ');
+    const txMatch    = searchText.match(/\b(Purchase|Sale)\b/i) ||
+                       line.match(/^\s*([PS])\s+\d/) ||  // P 01/16/2026
+                       line.match(/\s([PS])\s+\d{2}\/\d{2}/);  // SP ... P 01/16
 
-    if (hasTxType && amounts.length > 0 && (currentTicker || currentAsset)) {
-      const txMatch = line.match(/\b(Purchase|Sale|P|S)\b/i);
-      const txType  = txMatch ? txMatch[1] : '';
-      const type    = txType.toLowerCase().startsWith('p') ? 'Purchase' : 'Sale';
+    if (txMatch && currentTicker) {
+      const txWord = txMatch[1].toUpperCase();
+      currentType  = (txWord === 'P' || txWord.startsWith('P')) ? 'Purchase' : 'Sale';
+    }
 
-      // Get amount range
-      const amount = amounts[0] || 'Undisclosed';
-
-      if (currentTicker && currentTicker.length >= 1 && currentTicker.length <= 5) {
-        trades.push({ ticker: currentTicker, asset: currentAsset, type, amount });
-      }
+    // Find amount
+    const amountMatch = combined.match(amountPattern);
+    
+    if (currentTicker && currentType && amountMatch) {
+      trades.push({
+        ticker: currentTicker,
+        asset:  currentAsset,
+        type:   currentType,
+        amount: amountMatch[0],
+      });
+      // Only reset type/amount — keep ticker in case same stock traded again
+      currentType   = '';
     }
   }
 
-  // Deduplicate by ticker+type
+  // Strategy 2: Scan entire text for pattern blocks
+  // Pattern: ticker in parens followed within 200 chars by P or S and a dollar amount
+  const fullText = text.replace(/\n/g, ' ');
+  const blockPattern = /\(([A-Z]{1,5})\)[^$]{0,300}?\b(Purchase|Sale|[PS])\b[^$]{0,100}?(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/gi;
+  let match;
+  while ((match = blockPattern.exec(fullText)) !== null) {
+    const ticker = match[1];
+    const txWord = match[2].toUpperCase();
+    const type   = (txWord === 'P' || txWord === 'PURCHASE') ? 'Purchase' : 'Sale';
+    const amount = match[3];
+    // Skip common false positives
+    if (['ST', 'OT', 'AB', 'OP', 'MF', 'DC', 'LP', 'SP', 'JT', 'TR'].includes(ticker)) continue;
+    trades.push({ ticker, asset: '', type, amount });
+  }
+
+  // Deduplicate by ticker+type+amount, keeping first occurrence
   const seen = new Set();
   return trades.filter(t => {
-    const key = t.ticker + t.type;
+    if (!t.ticker || t.ticker.length < 1 || t.ticker.length > 5) return false;
+    const key = t.ticker + t.type + t.amount;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
