@@ -84,37 +84,40 @@ function parseTradesFromPdfText(text, representative) {
     }
   }
 
-  // Strategy 2: Scan entire text for pattern blocks
-  // House PTR PDF format (after newline->space):
-  // "Asset Name (TICKER) [ST] P 12/08/2025 01/01/2026 $1,001 - $15,000"
-  // OR: "Asset Name (TICKER) [ST] S (partial) 06/17/2025 08/11/2025 $1,001 - $15,000"
-  // Key: P or S appears as standalone word BEFORE two MM/DD/YYYY dates and an amount
-  
+  // Strategy 2: Scan full text for all patterns
   const fullText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ');
-  const SKIP = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','AB','HN']);
-  
-  // Main pattern: (TICKER)[optional tags] then P or S (with optional partial) then date date $amount
-  const blockPattern = /\(([A-Z]{1,5})\)(?:[^(]{0,80}?)\s(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
-  let match;
-  while ((match = blockPattern.exec(fullText)) !== null) {
-    const ticker = match[1];
-    const txCode = match[2];
-    const amount = match[5];
+  const SKIP = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','HN','NO','OF','IN','TO','AT','BY','AN','AS','OR','ON','IF']);
+
+  // Pattern A: (TICKER) [optional bracket tags] P|S [optional (partial)] DATE DATE $amount
+  // This is the exact House PTR table format
+  const patternA = /\(([A-Z]{1,5})\)(?:\s*\[[A-Z]{2}\])?(?:\s*\[[A-Z]{2}\])?\s+(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:[\s,]*-[\s,]*\$[\d,]+)?)/g;
+  let m;
+  while ((m = patternA.exec(fullText)) !== null) {
+    const ticker = m[1], txCode = m[2], amount = m[5];
     if (SKIP.has(ticker)) continue;
     trades.push({ ticker, asset: '', type: txCode === 'P' ? 'Purchase' : 'Sale', amount });
   }
-  
-  // Fallback: some PDFs have only one date column
-  const fallbackPattern = /\(([A-Z]{1,5})\)(?:[^(]{0,80}?)\s(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
-  while ((match = fallbackPattern.exec(fullText)) !== null) {
-    const ticker = match[1];
-    const txCode = match[2];
-    const amount = match[4];
+
+  // Pattern B: (TICKER) anywhere, then within 200 chars find P|S then DATE DATE $amount  
+  // More permissive fallback for varied PDF layouts
+  const patternB = /\(([A-Z]{1,5})\)[^$\n]{0,200}?\s(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:[\s,]*-[\s,]*\$[\d,]+)?)/g;
+  while ((m = patternB.exec(fullText)) !== null) {
+    const ticker = m[1], txCode = m[2], amount = m[5];
     if (SKIP.has(ticker)) continue;
-    // Only add if not already captured by main pattern
-    const alreadyFound = trades.some(t => t.ticker === ticker && t.type === (txCode === 'P' ? 'Purchase' : 'Sale') && t.amount === amount);
+    const alreadyFound = trades.some(t => t.ticker === ticker && t.amount === amount);
     if (!alreadyFound) {
       trades.push({ ticker, asset: '', type: txCode === 'P' ? 'Purchase' : 'Sale', amount });
+    }
+  }
+
+  // Pattern C: No date required — (TICKER) near P|S near $amount (most permissive)
+  // Only runs if patterns A+B found nothing
+  if (trades.length === 0) {
+    const patternC = /\(([A-Z]{1,5})\)[^$]{0,300}?\b(Purchase|Sale)\b[^$]{0,100}?(\$[\d,]+(?:[\s,]*-[\s,]*\$[\d,]+)?)/g;
+    while ((m = patternC.exec(fullText)) !== null) {
+      const ticker = m[1], txWord = m[2], amount = m[3];
+      if (SKIP.has(ticker)) continue;
+      trades.push({ ticker, asset: '', type: txWord === 'Purchase' ? 'Purchase' : 'Sale', amount });
     }
   }
 
