@@ -95,7 +95,7 @@ function parseTradesFromPdfText(text, representative) {
     const type   = (txWord === 'P' || txWord === 'PURCHASE') ? 'Purchase' : 'Sale';
     const amount = match[3];
     // Skip common false positives
-    if (['ST', 'OT', 'AB', 'OP', 'MF', 'DC', 'LP', 'SP', 'JT', 'TR'].includes(ticker)) continue;
+    if (['ST', 'OT', 'OP', 'MF', 'DC', 'SP', 'JT', 'TR', 'IRA', 'JA', 'DEP'].includes(ticker)) continue;
     trades.push({ ticker, asset: '', type, amount });
   }
 
@@ -196,7 +196,7 @@ app.get('/congress', async (req, res) => {
         });
 
       } catch(e) {
-        console.log('PDF error for', filing.name, ':', e.message);
+        console.log('PDF error for', filing.name, filing.docId, ':', e.message);
         filingsMeta.push({ Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:'?', Company:'See filing', Amount:'See filing', Date:filing.date, Filed:filing.date, Transaction:'Purchase/Sale', Committee:'', FilingUrl:pdfUrl });
       }
     }));
