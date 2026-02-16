@@ -213,4 +213,27 @@ app.get('/insiders', async (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
+
+// ── DEBUG: See raw PDF text ───────────────────────────────────
+app.get('/debug-pdf', async (req, res) => {
+  try {
+    const docId = req.query.doc || '20030977';
+    const year  = req.query.year || '2026';
+    const url   = `https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${year}/${docId}.pdf`;
+    const r     = await fetch(url, { headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:12000 });
+    if (!r.ok) return res.status(404).json({ error: `PDF fetch failed: ${r.status}` });
+    const buf  = await r.buffer();
+    const pdf  = await pdfParse(buf);
+    // Return first 3000 chars of raw text so we can see the exact format
+    res.json({
+      docId, url,
+      totalLength: pdf.text.length,
+      rawText: pdf.text.substring(0, 3000),
+      lines: pdf.text.substring(0, 3000).split('\n').slice(0, 80),
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.listen(PORT, () => console.log('The Rotation proxy running on port ' + PORT));
