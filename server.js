@@ -1,319 +1,158 @@
 const express = require('express');
-const cors = require('cors');
-const Parser = require('rss-parser');
-require('dotenv').config();
+const fetch   = require('node-fetch');
+const app     = express();
+const PORT    = process.env.PORT || 3000;
 
-const app = express();
-const parser = new Parser({
-  timeout: 10000,
-  headers: {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-  }
+// CORS headers
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin',  '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
 });
 
-app.use(cors());
-app.use(express.json());
+app.get('/', (req, res) => {
+  res.json({ status:'ok', service:'The Rotation Data Proxy', endpoints:['/congress','/insiders','/debug-xml','/debug-ptr'] });
+});
 
-// Comprehensive RSS Feed Sources - Reliable feeds that don't block bots
-const RSS_FEEDS = {
-  financial: [
-    { name: 'Yahoo Finance', url: 'https://finance.yahoo.com/news/rssindex', category: 'financial' },
-    { name: 'Investopedia', url: 'https://www.investopedia.com/feedbuilder/feed/getfeed?feedName=rss_headline', category: 'financial' },
-    { name: 'WSJ Markets', url: 'https://feeds.a.dj.com/rss/RSSMarketsMain.xml', category: 'financial' },
-    { name: 'CNBC Top News', url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html', category: 'financial' },
-    { name: 'MarketWatch', url: 'https://www.marketwatch.com/rss/topstories', category: 'financial' },
-    { name: 'Fortune', url: 'https://fortune.com/feed', category: 'financial' },
-    { name: 'Seeking Alpha Market News', url: 'https://seekingalpha.com/market_currents.xml', category: 'financial' },
-    { name: 'Reuters Money', url: 'https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best', category: 'financial' },
-    { name: 'Financial Times Markets', url: 'https://www.ft.com/markets?format=rss', category: 'financial' },
-    { name: 'TheStreet', url: 'https://www.thestreet.com/feeds/news.xml', category: 'financial' }
-  ],
-  news: [
-    { name: 'New York Times Business', url: 'https://rss.nytimes.com/services/xml/rss/nyt/Business.xml', category: 'news' },
-    { name: 'NPR Business', url: 'https://feeds.npr.org/1006/rss.xml', category: 'news' },
-    { name: 'The Guardian Business', url: 'https://www.theguardian.com/business/rss', category: 'news' },
-    { name: 'BBC Business', url: 'http://feeds.bbci.co.uk/news/business/rss.xml', category: 'news' },
-    { name: 'Reuters Top News', url: 'https://www.reutersagency.com/feed/?best-topics=tech&post_type=best', category: 'news' },
-    { name: 'Al Jazeera Economy', url: 'https://www.aljazeera.com/xml/rss/all.xml', category: 'news' },
-    { name: 'CBS News Money', url: 'https://www.cbsnews.com/latest/rss/moneywatch', category: 'news' },
-    { name: 'ABC News Business', url: 'https://abcnews.go.com/abcnews/businessheadlines', category: 'news' }
-  ],
-  tech: [
-    { name: 'TechCrunch', url: 'https://techcrunch.com/feed/', category: 'tech' },
-    { name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', category: 'tech' },
-    { name: 'Ars Technica', url: 'http://feeds.arstechnica.com/arstechnica/index', category: 'tech' },
-    { name: 'Wired', url: 'https://www.wired.com/feed/rss', category: 'tech' },
-    { name: 'Engadget', url: 'https://www.engadget.com/rss.xml', category: 'tech' },
-    { name: 'The Next Web', url: 'https://thenextweb.com/feed/', category: 'tech' },
-    { name: 'ZDNet', url: 'https://www.zdnet.com/news/rss.xml', category: 'tech' },
-    { name: 'MIT Technology Review', url: 'https://www.technologyreview.com/feed/', category: 'tech' }
-  ],
-  crypto: [
-    { name: 'CoinDesk', url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', category: 'crypto' },
-    { name: 'Decrypt', url: 'https://decrypt.co/feed', category: 'crypto' },
-    { name: 'Cointelegraph', url: 'https://cointelegraph.com/rss', category: 'crypto' },
-    { name: 'Bitcoin Magazine', url: 'https://bitcoinmagazine.com/feed', category: 'crypto' }
-  ],
-  venture: [
-    { name: 'Crunchbase News', url: 'https://news.crunchbase.com/feed/', category: 'venture' },
-    { name: 'VentureBeat', url: 'https://venturebeat.com/feed/', category: 'venture' },
-    { name: 'TechCrunch Startups', url: 'https://techcrunch.com/tag/startups/feed/', category: 'venture' }
-  ],
-  energy: [
-    { name: 'Energy News', url: 'https://www.energy-news.com/feed/', category: 'energy' },
-    { name: 'Renewable Energy World', url: 'https://www.renewableenergyworld.com/feeds/all/', category: 'energy' }
-  ],
-  healthcare: [
-    { name: 'FiercePharma', url: 'https://www.fiercepharma.com/rss/xml', category: 'healthcare' },
-    { name: 'MedCity News', url: 'https://medcitynews.com/feed/', category: 'healthcare' }
-  ]
-};
-
-// Flatten all feeds
-const ALL_FEEDS = Object.values(RSS_FEEDS).flat();
-
-// Cache for parsed feeds
-let feedCache = {
-  data: [],
-  lastUpdated: null
-};
-
-// Fetch and parse all RSS feeds
-async function fetchAllFeeds() {
-  console.log('📡 Fetching feeds from ' + ALL_FEEDS.length + ' sources...');
-  
-  const results = await Promise.allSettled(
-    ALL_FEEDS.map(async (feed) => {
-      try {
-        const parsed = await parser.parseURL(feed.url);
-        return {
-          source: feed.name,
-          category: feed.category,
-          items: parsed.items.slice(0, 20).map(item => ({
-            title: item.title,
-            link: item.link,
-            pubDate: item.pubDate || item.isoDate,
-            content: item.contentSnippet || item.content,
-            source: feed.name,
-            category: feed.category
-          }))
-        };
-      } catch (error) {
-        console.error(`❌ Failed to fetch ${feed.name}:`, error.message);
-        return null;
-      }
-    })
-  );
-
-  const articles = results
-    .filter(r => r.status === 'fulfilled' && r.value)
-    .flatMap(r => r.value.items)
-    .sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
-
-  console.log(`✅ Successfully fetched ${articles.length} articles`);
-  
-  feedCache = {
-    data: articles,
-    lastUpdated: new Date()
-  };
-
-  return articles;
+function stripHtml(s) {
+  return (s||'').replace(/<[^>]+>/g,'').replace(/&amp;/g,'&').replace(/&#39;/g,"'").replace(/&nbsp;/g,' ').trim();
 }
 
-// Analyze narratives using Claude
-async function analyzeNarratives(articles) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.log('⚠️  No Anthropic API key - using basic keyword extraction');
-    return extractBasicNarratives(articles);
-  }
-
+app.get('/debug-xml', async (req, res) => {
   try {
-    const recentArticles = articles.slice(0, 100);
-    const articlesText = recentArticles.map(a => 
-      `${a.title}\n${a.content?.substring(0, 200) || ''}`
-    ).join('\n\n---\n\n');
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2000,
-        messages: [{
-          role: 'user',
-          content: `Analyze these news headlines and identify the top 5-7 emerging narratives or themes. For each narrative, provide:
-1. A clear name/title
-2. Key topics involved
-3. Momentum (hot/warming/stable)
-4. Related industries
-5. Potential stock sectors or ETFs
-
-News articles:
-${articlesText}
-
-Return ONLY a JSON array with this structure:
-[{
-  "name": "narrative name",
-  "description": "brief description",
-  "momentum": "hot|warming|stable",
-  "confidence": 0-100,
-  "relatedIndustries": ["industry1", "industry2"],
-  "keywords": ["keyword1", "keyword2"],
-  "stockSectors": ["sector1", "sector2"],
-  "etfSymbols": ["symbol1", "symbol2"]
-}]`
-        }]
-      })
+    const r = await fetch('https://disclosures-clerk.house.gov/public_disc/financial-pdfs/2026FD.xml', {
+      headers: { 'User-Agent': 'Mozilla/5.0 TheRotation/1.0' }, timeout: 20000,
     });
-
-    const data = await response.json();
-    const text = data.content?.[0]?.text || '';
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-    
-    return extractBasicNarratives(articles);
-  } catch (error) {
-    console.error('Error analyzing with AI:', error);
-    return extractBasicNarratives(articles);
-  }
-}
-
-// Fallback: Basic keyword-based narrative extraction
-function extractBasicNarratives(articles) {
-  const keywords = {
-    'AI Revolution': ['ai', 'artificial intelligence', 'machine learning', 'chatgpt', 'openai'],
-    'EV & Clean Energy': ['electric vehicle', 'ev', 'tesla', 'clean energy', 'renewable'],
-    'Semiconductor Shortage': ['chip', 'semiconductor', 'nvidia', 'tsmc', 'intel'],
-    'Inflation & Fed Policy': ['inflation', 'federal reserve', 'interest rate', 'fed'],
-    'Tech Regulation': ['antitrust', 'regulation', 'privacy', 'data protection'],
-    'Crypto & Web3': ['bitcoin', 'crypto', 'blockchain', 'web3', 'ethereum']
-  };
-
-  const narratives = Object.entries(keywords).map(([name, terms]) => {
-    const matches = articles.filter(a => 
-      terms.some(term => 
-        (a.title + ' ' + a.content).toLowerCase().includes(term)
-      )
-    );
-
-    return {
-      name,
-      description: `Coverage of ${name.toLowerCase()} related topics`,
-      momentum: matches.length > 10 ? 'hot' : matches.length > 5 ? 'warming' : 'stable',
-      confidence: Math.min(matches.length * 10, 95),
-      articleCount: matches.length,
-      relatedIndustries: getIndustriesForNarrative(name),
-      keywords: terms,
-      stockSectors: getSectorsForNarrative(name),
-      etfSymbols: getETFsForNarrative(name)
-    };
-  }).filter(n => n.articleCount > 0)
-    .sort((a, b) => b.articleCount - a.articleCount);
-
-  return narratives;
-}
-
-function getIndustriesForNarrative(name) {
-  const mapping = {
-    'AI Revolution': ['Technology', 'Software', 'Cloud Computing'],
-    'EV & Clean Energy': ['Automotive', 'Energy', 'Materials'],
-    'Semiconductor Shortage': ['Technology', 'Manufacturing', 'Electronics'],
-    'Inflation & Fed Policy': ['Financial Services', 'Banking', 'Real Estate'],
-    'Tech Regulation': ['Technology', 'Legal Services', 'Telecommunications'],
-    'Crypto & Web3': ['FinTech', 'Technology', 'Financial Services']
-  };
-  return mapping[name] || ['General'];
-}
-
-function getSectorsForNarrative(name) {
-  const mapping = {
-    'AI Revolution': ['Technology', 'Communication Services'],
-    'EV & Clean Energy': ['Consumer Discretionary', 'Utilities'],
-    'Semiconductor Shortage': ['Information Technology', 'Industrials'],
-    'Inflation & Fed Policy': ['Financials', 'Real Estate'],
-    'Tech Regulation': ['Technology', 'Communication Services'],
-    'Crypto & Web3': ['Financials', 'Technology']
-  };
-  return mapping[name] || ['General'];
-}
-
-function getETFsForNarrative(name) {
-  const mapping = {
-    'AI Revolution': ['BOTZ', 'AIQ', 'IRBO', 'ROBT'],
-    'EV & Clean Energy': ['ICLN', 'TAN', 'LIT', 'DRIV'],
-    'Semiconductor Shortage': ['SMH', 'SOXX', 'XSD'],
-    'Inflation & Fed Policy': ['TIP', 'VTIP', 'SCHP'],
-    'Tech Regulation': ['XLK', 'VGT', 'QQQ'],
-    'Crypto & Web3': ['BITO', 'GBTC', 'BLOK']
-  };
-  return mapping[name] || [];
-}
-
-// API Endpoints
-app.get('/api/test', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'RSS Narrative Tracker API', 
-    feeds: ALL_FEEDS.length 
-  });
+    const xml  = await r.text();
+    const first = (xml.match(/<Member>([\s\S]*?)<\/Member>/i) || ['',''])[0];
+    res.json({ totalLength: xml.length, memberCount: (xml.match(/<Member>/gi)||[]).length, firstMember: first });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/feeds', async (req, res) => {
+app.get('/debug-ptr', async (req, res) => {
   try {
-    const articles = await fetchAllFeeds();
-    res.json({ 
-      success: true, 
-      count: articles.length,
-      articles: articles.slice(0, 50),
-      lastUpdated: feedCache.lastUpdated
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/narratives', async (req, res) => {
-  try {
-    if (!feedCache.data.length || 
-        !feedCache.lastUpdated || 
-        Date.now() - feedCache.lastUpdated > 300000) {
-      await fetchAllFeeds();
-    }
-
-    const narratives = await analyzeNarratives(feedCache.data);
-    
+    const url = 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20033981.xml';
+    const r   = await fetch(url, { headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:10000 });
+    const text = await r.text();
     res.json({
-      success: true,
-      narratives,
-      articleCount: feedCache.data.length,
-      lastUpdated: feedCache.lastUpdated
+      status: r.status, ok: r.ok,
+      contentType: r.headers.get('content-type'),
+      length: text.length,
+      preview: text.slice(0, 1000),
+      hasTransaction: text.includes('<Transaction>'),
+      hasPtrTxn: text.includes('<ptr-txn>'),
+      allTags: [...new Set((text.match(/<[A-Za-z][A-Za-z0-9_-]*>/g)||[]))].slice(0,40),
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/sources', (req, res) => {
-  res.json({
-    success: true,
-    sources: ALL_FEEDS.map(f => ({
-      name: f.name,
-      category: f.category
-    })),
-    total: ALL_FEEDS.length
-  });
+app.get('/congress', async (req, res) => {
+  try {
+    const filings = [];
+    for (const year of [2026, 2025]) {
+      const r = await fetch(`https://disclosures-clerk.house.gov/public_disc/financial-pdfs/${year}FD.xml`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 TheRotation/1.0' }, timeout: 20000,
+      });
+      if (!r.ok) continue;
+      const xml     = await r.text();
+      const members = xml.match(/<Member>([\s\S]*?)<\/Member>/gi) || [];
+      const cutoff  = Date.now() - 90 * 86400 * 1000;
+      members.forEach(m => {
+        const get = tag => { const x = m.match(new RegExp('<'+tag+'[^>]*>([^<]*)</'+tag+'>', 'i')); return x ? x[1].trim() : ''; };
+        if (get('FilingType') !== 'P') return;
+        const rawDate = get('FilingDate') || '';
+        let date = rawDate;
+        if (rawDate.includes('/')) {
+          const p = rawDate.split('/');
+          if (p.length === 3) date = p[2]+'-'+p[0].padStart(2,'0')+'-'+p[1].padStart(2,'0');
+        }
+        if (date && new Date(date).getTime() < cutoff) return;
+        filings.push({ name:(get('First')+' '+get('Last')).trim(), state:get('StateDst')||'?', date, docId:get('DocID'), year });
+      });
+      if (filings.length >= 25) break;
+    }
+    if (filings.length === 0) return res.status(404).json({ error:'No PTR filings found' });
+    const trades = [];
+    await Promise.all(filings.slice(0,20).map(async filing => {
+      const fallback = { Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:'?', Company:'See filing', Amount:'See filing', Date:filing.date, Filed:filing.date, Transaction:'Purchase/Sale', Committee:'', FilingUrl:`https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${filing.year}/${filing.docId}.pdf` };
+      if (!filing.docId) { trades.push(fallback); return; }
+      try {
+        const r = await fetch(`https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${filing.year}/${filing.docId}.xml`, {
+          headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:8000
+        });
+        if (!r.ok) { trades.push(fallback); return; }
+        const xml = await r.text();
+        const txnBlocks = xml.match(/<Transaction>([\s\S]*?)<\/Transaction>/gi) ||
+                          xml.match(/<ptr-txn>([\s\S]*?)<\/ptr-txn>/gi) ||
+                          xml.match(/<NewHoldingLine>([\s\S]*?)<\/NewHoldingLine>/gi) || [];
+        if (txnBlocks.length === 0) { trades.push(fallback); return; }
+        txnBlocks.forEach(txn => {
+          const get = tag => { const x = txn.match(new RegExp('<'+tag+'[^>]*>([^<]*)</'+tag+'>', 'i')); return x ? stripHtml(x[1]) : ''; };
+          trades.push({ Representative:filing.name, Party:'?', Chamber:'House', State:filing.state, Ticker:(get('ticker')||get('Ticker')||get('AssetCode')||'?').replace(/\$/g,'').trim(), Company:get('AssetDescription')||'?', Amount:get('amount')||get('Amount')||'Undisclosed', Date:filing.date, Filed:filing.date, Transaction:(get('type')||get('Type')||'').toLowerCase().includes('purchase')?'Purchase':'Sale', Committee:'', FilingUrl:`https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/${filing.year}/${filing.docId}.pdf` });
+        });
+      } catch(e) { trades.push(fallback); }
+    }));
+    trades.sort((a,b) => new Date(b.Date) - new Date(a.Date));
+    res.json({ success:true, count:trades.length, source:'US House PTR Filings', trades:trades.slice(0,80) });
+  } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 RSS Narrative Tracker running on http://localhost:${PORT}`);
-  console.log(`📡 Monitoring ${ALL_FEEDS.length} news sources`);
-  console.log(`🤖 AI Analysis: ${process.env.ANTHROPIC_API_KEY ? 'ENABLED' : 'DISABLED (using keyword extraction)'}`);
+app.get('/insiders', async (req, res) => {
+  try {
+    const CIKS = [
+      {cik:'1045810',ticker:'NVDA',company:'NVIDIA'},{cik:'320193',ticker:'AAPL',company:'Apple'},
+      {cik:'789019',ticker:'MSFT',company:'Microsoft'},{cik:'1326801',ticker:'META',company:'Meta'},
+      {cik:'1318605',ticker:'TSLA',company:'Tesla'},{cik:'34088',ticker:'XOM',company:'ExxonMobil'},
+      {cik:'40987',ticker:'GS',company:'Goldman Sachs'},{cik:'936395',ticker:'LMT',company:'Lockheed Martin'},
+      {cik:'101830',ticker:'RTX',company:'RTX Corp'},{cik:'1108524',ticker:'AMZN',company:'Amazon'},
+      {cik:'1652044',ticker:'GOOGL',company:'Alphabet'},{cik:'773840',ticker:'AMD',company:'AMD'},
+      {cik:'19617',ticker:'JPM',company:'JPMorgan'},
+    ];
+    const cutoff = Date.now() - 30 * 86400 * 1000;
+    const allTrades = [];
+    await Promise.all(CIKS.map(async ({cik, ticker, company}) => {
+      try {
+        const r = await fetch(`https://data.sec.gov/submissions/CIK${cik.padStart(10,'0')}.json`, {
+          headers:{'User-Agent':'TheRotation newsletter@therotation.com'}, timeout:8000
+        });
+        if (!r.ok) return;
+        const sub = await r.json();
+        const rec = sub?.filings?.recent || {};
+        const forms = rec.form || [], dates = rec.filingDate || [], accNs = rec.accessionNumber || [];
+        const recent = [];
+        forms.forEach((f,i) => { if (f !== '4') return; if (new Date(dates[i]).getTime() < cutoff) return; recent.push({date:dates[i], acc:accNs[i]}); });
+        await Promise.all(recent.slice(0,3).map(async ({date, acc}) => {
+          try {
+            const folder = acc.replace(/-/g,''), cikInt = parseInt(cik);
+            const idxR = await fetch(`https://www.sec.gov/Archives/edgar/data/${cikInt}/${folder}/${acc}-index.json`, { headers:{'User-Agent':'TheRotation newsletter@therotation.com'}, timeout:6000 });
+            let xmlFile = acc + '.xml';
+            if (idxR.ok) { const idx = await idxR.json(); const files = idx.directory?.item || []; const found = files.find(f => f.name && f.name.endsWith('.xml') && !f.name.includes('index')); if (found) xmlFile = found.name; }
+            const r2 = await fetch(`https://www.sec.gov/Archives/edgar/data/${cikInt}/${folder}/${xmlFile}`, { headers:{'User-Agent':'TheRotation newsletter@therotation.com'}, timeout:6000 });
+            if (!r2.ok) return;
+            const xml = await r2.text();
+            const getTag = tag => { const m = xml.match(new RegExp('<'+tag+'[^>]*>([\\s\\S]*?)</'+tag+'>', 'i')); return m ? stripHtml(m[1]) : ''; };
+            const name = getTag('rptOwnerName') || 'Unknown';
+            const role = getTag('officerTitle') || (xml.includes('<isDirector>1') ? 'Director' : 'Insider');
+            const txns = xml.match(/<nonDerivativeTransaction>([\s\S]*?)<\/nonDerivativeTransaction>/gi) || [];
+            txns.forEach(txn => {
+              const getB = tag => { const m = txn.match(new RegExp('<'+tag+'[^>]*>([^<]*)</'+tag+'>', 'i')); return m ? m[1].trim() : ''; };
+              const code = getB('transactionCode'), shares = parseFloat(getB('transactionShares')||'0'), price = parseFloat(getB('transactionPricePerShare')||'0'), value = shares * price;
+              if (value < 10000) return;
+              const type = code==='P'?'Purchase':code==='S'?'Sale':null;
+              if (!type) return;
+              allTrades.push({date,ticker,company,name,role,type,shares:Math.round(shares),price,value:Math.round(value)});
+            });
+          } catch(e) {}
+        }));
+      } catch(e) { console.log('CIK error',cik,e.message); }
+    }));
+    const byTicker = {};
+    allTrades.forEach(t => { if (!byTicker[t.ticker]) byTicker[t.ticker] = {ticker:t.ticker,company:t.company,buys:[],sells:[]}; if (t.type==='Purchase') byTicker[t.ticker].buys.push(t); else byTicker[t.ticker].sells.push(t); });
+    const clustered = Object.values(byTicker).filter(g => g.buys.length+g.sells.length > 0).sort((a,b) => (b.buys.length+b.sells.length)-(a.buys.length+a.sells.length));
+    res.json({success:true, count:allTrades.length, source:'SEC EDGAR Form 4', trades:allTrades, clustered});
+  } catch(err) { res.status(500).json({error:err.message}); }
 });
+
+app.listen(PORT, () => console.log('The Rotation proxy running on port ' + PORT));
