@@ -85,35 +85,37 @@ function parseTradesFromPdfText(text, representative) {
   }
 
   // Strategy 2: Scan entire text for pattern blocks
-  // House PTR format: (TICKER) [TYPE] ... P|S ... MM/DD/YYYY ... $amount
-  // The P or S transaction code appears between asset description and the trade date
-  // We match: (TICKER) then whitespace then exactly P or S then a date then amount
-  const fullText = text.replace(/\n/g, ' ');
+  // House PTR PDF format (after newline->space):
+  // "Asset Name (TICKER) [ST] P 12/08/2025 01/01/2026 $1,001 - $15,000"
+  // OR: "Asset Name (TICKER) [ST] S (partial) 06/17/2025 08/11/2025 $1,001 - $15,000"
+  // Key: P or S appears as standalone word BEFORE two MM/DD/YYYY dates and an amount
   
-  // Pattern: (TICKER) followed by P or S as standalone character before a date
-  // \s[PS]\s matches P or S surrounded by spaces (not part of SP, LP, etc.)
-  const blockPattern = /\(([A-Z]{1,5})\)(?:[^()]{0,150}?)\s([PS])(?:\s+(?:partial\s+)?)(\d{2}\/\d{2}\/\d{4})[^$]{0,100}?(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
+  const fullText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ');
+  const SKIP = new Set(['ST','OT','OP','MF','DC','SP','JT','TR','IRA','JA','DEP','LP','AB','HN']);
+  
+  // Main pattern: (TICKER)[optional tags] then P or S (with optional partial) then date date $amount
+  const blockPattern = /\(([A-Z]{1,5})\)(?:[^(]{0,80}?)\s(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
   let match;
   while ((match = blockPattern.exec(fullText)) !== null) {
     const ticker = match[1];
-    const txCode = match[2].toUpperCase();
-    const type   = txCode === 'P' ? 'Purchase' : 'Sale';
-    const amount = match[4];
-    // Skip asset type tags and ownership codes
-    if (['ST', 'OT', 'OP', 'MF', 'DC', 'SP', 'JT', 'TR', 'IRA', 'JA', 'DEP', 'AB'].includes(ticker)) continue;
-    if (!amount) continue;
-    trades.push({ ticker, asset: '', type, amount });
+    const txCode = match[2];
+    const amount = match[5];
+    if (SKIP.has(ticker)) continue;
+    trades.push({ ticker, asset: '', type: txCode === 'P' ? 'Purchase' : 'Sale', amount });
   }
   
-  // Also catch "Purchase" or "Sale" written out (some PDFs spell it out)
-  const spelledPattern = /\(([A-Z]{1,5})\)(?:[^()]{0,150}?)(Purchase|Sale)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})[^$]{0,100}?(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
-  while ((match = spelledPattern.exec(fullText)) !== null) {
+  // Fallback: some PDFs have only one date column
+  const fallbackPattern = /\(([A-Z]{1,5})\)(?:[^(]{0,80}?)\s(P|S)(?:\s+\(partial\))?\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:\s*-\s*\$[\d,]+)?)/g;
+  while ((match = fallbackPattern.exec(fullText)) !== null) {
     const ticker = match[1];
-    const type   = match[2] === 'Purchase' ? 'Purchase' : 'Sale';
+    const txCode = match[2];
     const amount = match[4];
-    if (['ST', 'OT', 'OP', 'MF', 'DC', 'SP', 'JT', 'TR', 'IRA', 'JA', 'DEP'].includes(ticker)) continue;
-    if (!amount) continue;
-    trades.push({ ticker, asset: '', type, amount });
+    if (SKIP.has(ticker)) continue;
+    // Only add if not already captured by main pattern
+    const alreadyFound = trades.some(t => t.ticker === ticker && t.type === (txCode === 'P' ? 'Purchase' : 'Sale') && t.amount === amount);
+    if (!alreadyFound) {
+      trades.push({ ticker, asset: '', type: txCode === 'P' ? 'Purchase' : 'Sale', amount });
+    }
   }
 
   // Deduplicate by ticker+type+amount, keeping first occurrence
@@ -325,6 +327,22 @@ app.get('/insiders', async (req, res) => {
 
     res.json({success:true, count:allTrades.length, source:'SEC EDGAR Form 4', trades:allTrades, clustered});
   } catch(err) { res.status(500).json({error:err.message}); }
+});
+
+app.get('/debug-pdf', async (req, res) => {
+  try {
+    const pdfParse = require('pdf-parse');
+    const url = 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20030977.pdf';
+    const r = await fetch(url, { headers:{'User-Agent':'Mozilla/5.0 TheRotation/1.0'}, timeout:15000 });
+    const buffer = await r.buffer();
+    const pdf = await pdfParse(buffer);
+    // Return first 3000 chars of extracted text so we can see exact format
+    res.json({
+      pages: pdf.numpages,
+      textLength: pdf.text.length,
+      rawText: pdf.text.slice(0, 3000),
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.listen(PORT, () => console.log('The Rotation proxy running on port ' + PORT));
